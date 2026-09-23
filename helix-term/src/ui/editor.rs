@@ -20,7 +20,7 @@ use helix_core::{
     syntax::{self, OverlayHighlights},
     text_annotations::TextAnnotations,
     unicode::width::UnicodeWidthStr,
-    visual_offset_from_block, Change, Position, Range, Selection, Transaction,
+    visual_offset_from_block, Position, Range, Selection,
 };
 use helix_view::{
     annotations::diagnostics::DiagnosticFilter,
@@ -46,13 +46,9 @@ pub struct EditorView {
     terminal_focused: bool,
 }
 
-#[derive(Debug, Clone)]
 pub enum InsertEvent {
-    Key(KeyEvent),
-    CompletionApply {
-        trigger_offset: usize,
-        changes: Vec<Change>,
-    },
+    Key(()),
+    CompletionApply {},
     TriggerCompletion,
     RequestCompletion,
 }
@@ -238,7 +234,7 @@ impl EditorView {
         let statusline_area = view
             .area
             .clip_top(view.area.height.saturating_sub(1))
-            .clip_bottom(1); // -1 from bottom to remove commandline
+            .clip_bottom(config.commandline as u16); // -1 from bottom to remove commandline
 
         let mut context =
             statusline::RenderContext::new(editor, doc, view, is_focused, &self.spinners);
@@ -343,7 +339,7 @@ impl EditorView {
         .map_or(visible_range.start as u32, |node| node.start_byte());
         let range = start..visible_range.end as u32;
 
-        Some(syntax.rainbow_highlights(text, theme.rainbow_length(), loader, range))
+        Some(syntax.rainbow_highlights(text, theme.rainbow_bracket_length(), loader, range))
     }
 
     /// Get highlight spans for document diagnostics
@@ -1026,54 +1022,6 @@ impl EditorView {
                 let i = i.to_digit(10).unwrap() as usize;
                 cxt.editor.count = NonZeroUsize::new(i);
             }
-            // special handling for repeat operator
-            (key!('.'), _) if self.keymaps.pending().is_empty() => {
-                for _ in 0..cxt.editor.count.map_or(1, NonZeroUsize::into) {
-                    // first execute whatever put us into insert mode
-                    self.last_insert.0.execute(cxt);
-                    let mut last_savepoint = None;
-                    let mut last_request_savepoint = None;
-                    // then replay the inputs
-                    for key in self.last_insert.1.clone() {
-                        match key {
-                            InsertEvent::Key(key) => self.insert_mode(cxt, key),
-                            InsertEvent::CompletionApply {
-                                trigger_offset,
-                                changes,
-                            } => {
-                                let (view, doc) = current!(cxt.editor);
-
-                                if let Some(last_savepoint) = last_savepoint.as_deref() {
-                                    doc.restore(view, last_savepoint, true);
-                                }
-
-                                let text = doc.text().slice(..);
-                                let cursor = doc.selection(view.id).primary().cursor(text);
-
-                                let shift_position = |pos: usize| -> usize {
-                                    (pos + cursor).saturating_sub(trigger_offset)
-                                };
-
-                                let tx = Transaction::change(
-                                    doc.text(),
-                                    changes.iter().cloned().map(|(start, end, t)| {
-                                        (shift_position(start), shift_position(end), t)
-                                    }),
-                                );
-                                doc.apply(&tx, view.id);
-                            }
-                            InsertEvent::TriggerCompletion => {
-                                last_savepoint = take(&mut last_request_savepoint);
-                            }
-                            InsertEvent::RequestCompletion => {
-                                let (view, doc) = current!(cxt.editor);
-                                last_request_savepoint = Some(doc.savepoint(view));
-                            }
-                        }
-                    }
-                }
-                cxt.editor.count = None;
-            }
             _ => {
                 // set the count
                 cxt.count = cxt.editor.count;
@@ -1130,14 +1078,11 @@ impl EditorView {
             match last_completion {
                 CompleteAction::Triggered => (),
                 CompleteAction::Applied {
-                    trigger_offset,
-                    changes,
+                    trigger_offset: _,
+                    changes: _,
                     placeholder,
                 } => {
-                    self.last_insert.1.push(InsertEvent::CompletionApply {
-                        trigger_offset,
-                        changes,
-                    });
+                    self.last_insert.1.push(InsertEvent::CompletionApply {});
                     on_next_key = placeholder.then_some(Box::new(|cx, key| {
                         if let Some(c) = key.char() {
                             let (view, doc) = current!(cx.editor);
@@ -1544,7 +1489,7 @@ impl Component for EditorView {
                                 self.insert_mode(&mut cx, key);
 
                                 // record last_insert key
-                                self.last_insert.1.push(InsertEvent::Key(key));
+                                self.last_insert.1.push(InsertEvent::Key(()));
                             }
                         }
                         mode => self.command_mode(mode, &mut cx, key),
@@ -1628,11 +1573,13 @@ impl Component for EditorView {
             _ => false,
         };
 
-        // -1 for commandline and -1 for bufferline
-        let mut editor_area = area.clip_bottom(1);
-        if use_bufferline {
-            editor_area = editor_area.clip_top(1);
+        let editor_area = if use_bufferline {
+            // -1 for bufferline
+            area.clip_top(1)
+        } else {
+            area
         }
+        .clip_bottom(config.commandline as u16); // -1 for commandline
 
         // if the terminal size suddenly changed, we need to trigger a resize
         cx.editor.resize(editor_area);
@@ -1656,6 +1603,9 @@ impl Component for EditorView {
         let key_width = 15u16; // for showing pending keys
         let mut status_msg_width = 0;
 
+        // commandline
+        let commandline_msg_pos = if config.commandline { 1 } else { 2 };
+
         // render status msg
         if let Some((status_msg, severity)) = &cx.editor.status_msg {
             status_msg_width = status_msg.width();
@@ -1668,7 +1618,7 @@ impl Component for EditorView {
 
             surface.set_string(
                 area.x,
-                area.y + area.height.saturating_sub(1),
+                area.y + area.height.saturating_sub(commandline_msg_pos),
                 status_msg,
                 style,
             );
@@ -1698,7 +1648,7 @@ impl Component for EditorView {
                     + area
                         .width
                         .saturating_sub(key_width + macro_width + trust_width),
-                area.y + area.height.saturating_sub(1),
+                area.y + area.height.saturating_sub(commandline_msg_pos),
                 disp.get(disp.len().saturating_sub(key_width as usize)..)
                     .unwrap_or(&disp),
                 style,
@@ -1722,7 +1672,7 @@ impl Component for EditorView {
                     .add_modifier(Modifier::BOLD);
                 surface.set_string(
                     area.x + area.width.saturating_sub(3),
-                    area.y + area.height.saturating_sub(1),
+                    area.y + area.height.saturating_sub(commandline_msg_pos),
                     &disp,
                     style,
                 );

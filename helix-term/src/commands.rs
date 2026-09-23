@@ -79,6 +79,7 @@ use std::{
     future::Future,
     io::Read,
     num::NonZeroUsize,
+    sync::Arc,
 };
 
 use std::{
@@ -3489,7 +3490,7 @@ fn jumplist_picker(cx: &mut Context) {
 
 fn changed_file_picker(cx: &mut Context) {
     pub struct FileChangeData {
-        cwd: PathBuf,
+        cwd: Arc<Path>,
         style_untracked: Style,
         style_modified: Style,
         style_conflict: Style,
@@ -3497,7 +3498,7 @@ fn changed_file_picker(cx: &mut Context) {
         style_renamed: Style,
     }
 
-    let cwd = helix_stdx::env::current_working_dir();
+    let cwd: Arc<Path> = Arc::from(helix_stdx::env::current_working_dir().as_path());
     if !cwd.exists() {
         cx.editor
             .set_error("Current working directory does not exist");
@@ -3576,17 +3577,24 @@ fn changed_file_picker(cx: &mut Context) {
             helix_loader::workspace_trust::TrustQuery::Git,
         )
         .is_trusted();
-    cx.editor
-        .diff_providers
-        .clone()
-        .for_each_changed_file(cwd, trust_full, move |change| match change {
+    // Helix can be launched without arguments, in which case no diff provider will be loaded since
+    // there is no file to provide infos for.
+    //
+    // This ensures we have one to work with for cwd (and as a bonus it means any file opened
+    // from this picker will have its diff provider already in cache).
+    cx.editor.diff_providers.add(&cwd, trust_full);
+    cx.editor.diff_providers.clone().for_each_changed_file(
+        cwd.clone(),
+        move |change| match change {
             Ok(change) => injector.push(change).is_ok(),
             Err(err) => {
                 status::report_blocking(err);
                 true
             }
-        });
+        },
+    );
     cx.push_layer(Box::new(overlaid(picker)));
+    cx.editor.diff_providers.remove(&cwd);
 }
 
 pub fn command_palette(cx: &mut Context) {
@@ -6320,6 +6328,32 @@ fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
                         'e' => textobject_treesitter("entry", range),
                         'x' => textobject_treesitter("xml-element", range),
                         'p' => textobject::textobject_paragraph(text, range, objtype, count),
+                        'i' => {
+                            let tab_width = doc.tab_width();
+                            let indent_width = doc.indent_width();
+                            textobject::textobject_indent(
+                                text,
+                                range,
+                                objtype,
+                                count,
+                                false,
+                                tab_width,
+                                indent_width,
+                            )
+                        }
+                        'I' => {
+                            let tab_width = doc.tab_width();
+                            let indent_width = doc.indent_width();
+                            textobject::textobject_indent(
+                                text,
+                                range,
+                                objtype,
+                                count,
+                                true,
+                                tab_width,
+                                indent_width,
+                            )
+                        }
                         'm' => textobject::textobject_pair_surround_closest(
                             doc.syntax(),
                             text,
@@ -6355,6 +6389,8 @@ fn select_textobject(cx: &mut Context, objtype: textobject::TextObject) {
         ("w", "Word"),
         ("W", "WORD"),
         ("p", "Paragraph"),
+        ("i", "Indentation level"),
+        ("I", "Indentation level (+ surrounding lines)"),
         ("t", "Type definition (tree-sitter)"),
         ("f", "Function (tree-sitter)"),
         ("a", "Argument/parameter (tree-sitter)"),
