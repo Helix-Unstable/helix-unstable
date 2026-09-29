@@ -161,6 +161,8 @@ pub fn raw_regex_prompt(
                             doc.set_selection(view.id, snapshot.clone());
                             doc.set_view_offset(view.id, offset_snapshot);
 
+                            let commandline = config.commandline as usize;
+
                             if event == PromptEvent::Validate {
                                 let callback = async move {
                                     let call: job::Callback = Callback::EditorCompositor(Box::new(
@@ -169,7 +171,7 @@ pub fn raw_regex_prompt(
                                             let size = compositor.size();
                                             let popup = Popup::new("invalid-regex", contents)
                                                 .position(Some(helix_core::Position::new(
-                                                    size.height as usize - 2, // 2 = statusline + commandline
+                                                    size.height as usize - 1 - commandline, // 2 = statusline + commandline
                                                     0,
                                                 )))
                                                 .auto_close(true);
